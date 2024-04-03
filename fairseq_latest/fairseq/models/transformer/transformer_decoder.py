@@ -375,8 +375,8 @@ class TransformerDecoderBase(FairseqIncrementalDecoder):
 
             x, layer_attn, norm = layer( # changed by Goro Kobayashi
                 x,
-                encoder_out.encoder_out if encoder_out is not None else None,
-                encoder_out.encoder_padding_mask if encoder_out is not None else None,
+                encoder_out["encoder_out"][0] if encoder_out is not None else None,
+                encoder_out["encoder_padding_mask"][0] if encoder_out is not None else None,
                 incremental_state,
                 self_attn_mask=self_attn_mask,
                 self_attn_padding_mask=self_attn_padding_mask,
