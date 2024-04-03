@@ -478,6 +478,8 @@ class MultiheadAttention(FairseqIncrementalDecoder):
         attn_mask: Optional[Tensor] = None,
         before_softmax: bool = False,
         need_head_weights: bool = False,
+        output_all_attentions: bool = False, # added by Goro Kobayashi
+        output_all_norms: bool = False, # added by Goro Kobayashi
     ) -> Tuple[Tensor, Optional[Tensor]]:
         """Input shape: Time x Batch x Channel
 
@@ -495,8 +497,15 @@ class MultiheadAttention(FairseqIncrementalDecoder):
             need_head_weights (bool, optional): return the attention
                 weights for each head. Implies *need_weights*. Default:
                 return the average attention weights over all heads.
+            -----Comments below are added by Goro Kobayashi-----
+            output_all_attentions (bool, optional): return the attention
+                weights for all heads (default: False).
+            output_all_norms (bool, optional): return the norms 
+                (||f(x)||, ||αf(x)||, and ||Σαf(x)||, 
+                detailed in https://arxiv.org/abs/2004.10102)
+                for all heads (default: False).
         """
-        if need_head_weights:
+        if need_head_weights or output_all_attentions: # Changed by Goro Kobayashi
             need_weights = True
 
         is_tpu = query.device.type == "xla"
@@ -776,10 +785,44 @@ class MultiheadAttention(FairseqIncrementalDecoder):
             attn_weights = attn_weights_float.view(
                 bsz, self.num_heads, tgt_len, src_len
             ).transpose(1, 0)
-            if not need_head_weights:
+            if not need_head_weights and not output_all_attentions: # Changed by Goro Kobayashi
                 # average attention weights over heads
                 attn_weights = attn_weights.mean(dim=0)
 
+        # -----added below by Goro Kobayashi-----
+        if output_all_norms:
+            with torch.no_grad():
+                # Reshape Value vectors into (bsz, src_len, num_heads, 1, head_dim)
+                v = v.contiguous().view(bsz, self.num_heads, -1, 1, self.head_dim).transpose(1, 2)
+                
+                # Dense weights W^O: (embed_dim, embed_dim)
+                dense = self.out_proj.weight
+                
+                # Reshape W^O into (num_heads, head_dim, embed_dim)
+                dense = dense.view(embed_dim, self.num_heads, self.head_dim).permute(1,2,0).contiguous()
+                
+                # By matrix product, make transformed vectors f(x): (bsz, num_heads, src_len, embed_dim)
+                transformed_vectors = v.matmul(dense).view(bsz, -1, self.num_heads, embed_dim)
+                transformed_vectors = transformed_vectors.permute(0, 2, 1, 3)
+
+                # Calculate L2 norm ||f(x)||: (num_heads, bsz, src_len)
+                transformed_vector_norm = torch.norm(transformed_vectors, dim=-1).transpose(0, 1)
+                
+                # By element product, make weighted vectors αf(x): (bsz, num_heads, tgt_len, src_len, embed_dim)
+                attn_probs = attn_probs.view(bsz, self.num_heads, tgt_len, src_len)
+                weighted_vectors = torch.einsum('bhts,bhsd->bhtsd', attn_probs, transformed_vectors)
+                
+                # Calculate L2 norm ||αf(x)||: (num_heads, bsz, tgt_len, src_len)
+                weighted_vector_norm = torch.norm(weighted_vectors, dim=-1).transpose(0, 1)
+                
+                # Sum each αf(x) over all heads: (bsz, tgt_len, src_len, embed_dim)
+                summed_weighted_vectors = weighted_vectors.sum(dim=1)
+
+                # Calculate L2 norm of summed weighted vectors: (bsz, tgt_len, src_len)
+                summed_weighted_vector_norm = torch.norm(summed_weighted_vectors, dim=-1)
+            return attn, attn_weights, (transformed_vector_norm, weighted_vector_norm, summed_weighted_vector_norm)
+        # -----added above by Goro Kobayashi-----
+        
         return attn, attn_weights
 
     @staticmethod

@@ -393,6 +393,8 @@ class TransformerDecoderLayerBase(nn.Module):
         self_attn_padding_mask: Optional[torch.Tensor] = None,
         need_attn: bool = False,
         need_head_weights: bool = False,
+        output_all_attentions: bool = False, # added by Goro Kobayashi
+        output_all_norms: bool = False, # added by Goro Kobayashi
     ):
         """
         Args:
@@ -403,6 +405,13 @@ class TransformerDecoderLayerBase(nn.Module):
             need_attn (bool, optional): return attention weights
             need_head_weights (bool, optional): return attention weights
                 for each head (default: return average over heads).
+            -----Comments below are added by Goro Kobayashi-----
+            output_all_attentions (bool, optional): return the attention weights
+                for all heads (default: False).
+            output_all_norms (bool, optional): return the norms 
+                (||f(x)||, ||αf(x)||, and ||Σαf(x)||, detailed in https://arxiv.org/abs/2004.10102) 
+                for all heads (default: False).
+            ------------------------------------------------------
 
         Returns:
             encoded output of shape `(seq_len, batch, embed_dim)`
@@ -484,7 +493,8 @@ class TransformerDecoderLayerBase(nn.Module):
                 assert incremental_state is not None
                 self.encoder_attn._set_input_buffer(incremental_state, saved_state)
 
-            x, attn = self.encoder_attn(
+            # -----Changed below by Goro Kobayashi-----
+            outputs = self.encoder_attn(
                 query=x,
                 key=encoder_out,
                 value=encoder_out,
@@ -493,7 +503,16 @@ class TransformerDecoderLayerBase(nn.Module):
                 static_kv=True,
                 need_weights=need_attn or (not self.training and self.need_attn),
                 need_head_weights=need_head_weights,
+                output_all_attentions=output_all_attentions,
+                output_all_norms=output_all_norms,
             )
+            
+            if output_all_norms:
+                x, attn, norms = outputs
+            else:
+                x, attn = outputs
+            # -----Changed above by Goro Kobayashi-----
+                
             x = self.dropout_module(x)
             x = self.residual_connection(x, residual)
             if not self.normalize_before:
@@ -525,8 +544,15 @@ class TransformerDecoderLayerBase(nn.Module):
                 ]
             else:
                 self_attn_state = [saved_state["prev_key"], saved_state["prev_value"]]
+                assert output_all_norms == False # added by Goro Kobayashi
             return x, attn, self_attn_state
-        return x, attn, None
+        
+        # -----changed below by Goro Kobayashi-----
+        if output_all_norms:
+            return x, attn, norms
+        else:
+            return x, attn, None
+        # -----changed above by Goro Kobayashi-----
 
     def make_generation_fast_(self, need_attn: bool = False, **kwargs):
         self.need_attn = need_attn

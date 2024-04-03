@@ -194,6 +194,8 @@ class TransformerDecoderBase(FairseqIncrementalDecoder):
         alignment_heads: Optional[int] = None,
         src_lengths: Optional[Any] = None,
         return_all_hiddens: bool = False,
+        output_all_attentions: bool = False, # added by Goro Kobayashi
+        output_all_norms: bool = False, # added by Goro Kobayashi
     ):
         """
         Args:
@@ -208,6 +210,14 @@ class TransformerDecoderBase(FairseqIncrementalDecoder):
             full_context_alignment (bool, optional): don't apply
                 auto-regressive mask to self-attention (default: False).
 
+            -----comments below are added by Goro Kobayashi-----
+            output_all_attentions (bool, optional): return the attention
+                weights for all heads (default: False).
+            output_all_norms  (bool, optional): return the norms (||f(x)||, 
+                ||αf(x)||, and ||Σαf(x)|| detailed in https://arxiv.org/abs/2004.10102)
+                for all heads (default: False).
+            ----------------------------------------------------
+
         Returns:
             tuple:
                 - the decoder's output of shape `(batch, tgt_len, vocab)`
@@ -221,6 +231,8 @@ class TransformerDecoderBase(FairseqIncrementalDecoder):
             full_context_alignment=full_context_alignment,
             alignment_layer=alignment_layer,
             alignment_heads=alignment_heads,
+            output_all_attentions=output_all_attentions, # added by Goro Kobayashi
+            output_all_norms=output_all_norms, # added by Goro Kobayashi
         )
 
         if not features_only:
@@ -235,6 +247,8 @@ class TransformerDecoderBase(FairseqIncrementalDecoder):
         full_context_alignment: bool = False,
         alignment_layer: Optional[int] = None,
         alignment_heads: Optional[int] = None,
+        output_all_attentions: bool = False, # added by Goro Kobayashi
+        output_all_norms: bool = False, # added by Goro Kobayashi
     ):
         return self.extract_features_scriptable(
             prev_output_tokens,
@@ -243,6 +257,8 @@ class TransformerDecoderBase(FairseqIncrementalDecoder):
             full_context_alignment,
             alignment_layer,
             alignment_heads,
+            output_all_attentions, # added by Goro Kobayashi
+            output_all_norms, # added by Goro Kobayashi
         )
 
     """
@@ -259,6 +275,8 @@ class TransformerDecoderBase(FairseqIncrementalDecoder):
         full_context_alignment: bool = False,
         alignment_layer: Optional[int] = None,
         alignment_heads: Optional[int] = None,
+        output_all_attentions: bool = False, # added by Goro Kobayashi
+        output_all_norms: bool = False, # added by Goro Kobayashi
     ):
         """
         Similar to *forward* but only return features.
@@ -273,6 +291,13 @@ class TransformerDecoderBase(FairseqIncrementalDecoder):
                 heads at this layer (default: last layer).
             alignment_heads (int, optional): only average alignment over
                 this many heads (default: all heads).
+            -----comments below are added by Goro Kobayashi-----
+            output_all_attentions (bool, optional): return the attention
+                weights for all heads (default: False).
+            output_all_norms  (bool, optional): return the norms (||f(x)||, 
+                ||αf(x)||, and ||Σαf(x)|| detailed in https://arxiv.org/abs/2004.10102)
+                for all heads (default: False).
+            ----------------------------------------------------
 
         Returns:
             tuple:
@@ -329,7 +354,18 @@ class TransformerDecoderBase(FairseqIncrementalDecoder):
             self_attn_padding_mask = prev_output_tokens.eq(self.padding_idx)
 
         # decoder layers
-        attn: Optional[Tensor] = None
+        # -----added below by Goro Kobayashi-----
+        if output_all_attentions:
+            attn = []
+        else:
+            attn: Optional[Tensor] = None
+        
+        if output_all_norms:
+            transformed_vector_norm = []
+            weighted_vector_norm = []
+            summed_weighted_vector_norm = []
+        # -----added above by Goro Kobayashi-----
+            
         inner_states: List[Optional[Tensor]] = [x]
         for idx, layer in enumerate(self.layers):
             if incremental_state is None and not full_context_alignment:
@@ -337,21 +373,33 @@ class TransformerDecoderBase(FairseqIncrementalDecoder):
             else:
                 self_attn_mask = None
 
-            x, layer_attn, _ = layer(
+            x, layer_attn, norm = layer( # changed by Goro Kobayashi
                 x,
-                enc,
-                padding_mask,
+                encoder_out.encoder_out if encoder_out is not None else None,
+                encoder_out.encoder_padding_mask if encoder_out is not None else None,
                 incremental_state,
                 self_attn_mask=self_attn_mask,
                 self_attn_padding_mask=self_attn_padding_mask,
                 need_attn=bool((idx == alignment_layer)),
                 need_head_weights=bool((idx == alignment_layer)),
+                output_all_attentions=output_all_attentions, # added by Goro Kobayashi
+                output_all_norms=output_all_norms, # added by Goro Kobayashi
             )
             inner_states.append(x)
-            if layer_attn is not None and idx == alignment_layer:
+
+            # -----added below by Goro Kobayashi-----
+            if output_all_attentions:
+                attn.append(layer_attn.float().to(x))
+            elif layer_attn is not None and idx == alignment_layer:
                 attn = layer_attn.float().to(x)
 
-        if attn is not None:
+            if output_all_norms:
+                transformed_vector_norm.append(norm[0].float().to(x))
+                weighted_vector_norm.append(norm[1].float().to(x))
+                summed_weighted_vector_norm.append(norm[2].float().to(x))
+            # -----added above by Goro Kobayashi-----
+
+        if attn is not None and not output_all_attentions: # changed by Goro Kobayashi
             if alignment_heads is not None:
                 attn = attn[:alignment_heads]
 
@@ -367,7 +415,15 @@ class TransformerDecoderBase(FairseqIncrementalDecoder):
         if self.project_out_dim is not None:
             x = self.project_out_dim(x)
 
-        return x, {"attn": [attn], "inner_states": inner_states}
+        # -----changed below by Goro Kobayashi-----
+        if not output_all_attentions:
+            attn = [attn]
+
+        if output_all_norms:
+            return x, {"attn": attn, "inner_states": inner_states, "norms": (transformed_vector_norm, weighted_vector_norm, summed_weighted_vector_norm)}
+        else:
+            return x, {"attn": attn, "inner_states": inner_states}
+        # -----changed above by Goro Kobayashi-----
 
     def output_layer(self, features):
         """Project features to the vocabulary size."""

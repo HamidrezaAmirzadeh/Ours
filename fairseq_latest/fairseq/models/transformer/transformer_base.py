@@ -151,6 +151,8 @@ class TransformerModelBase(FairseqEncoderDecoderModel):
         features_only: bool = False,
         alignment_layer: Optional[int] = None,
         alignment_heads: Optional[int] = None,
+        output_all_attentions: bool = False, # added by Goro Kobayashi
+        output_all_norms: bool = False, # added by Goro Kobayashi
     ):
         """
         Run the forward pass for an encoder-decoder model.
@@ -169,6 +171,8 @@ class TransformerModelBase(FairseqEncoderDecoderModel):
             alignment_heads=alignment_heads,
             src_lengths=src_lengths,
             return_all_hiddens=return_all_hiddens,
+            output_all_attentions=output_all_attentions, # added by Goro Kobayashi
+            output_all_norms=output_all_norms, # added by Goro Kobayashi
         )
         return decoder_out
 
